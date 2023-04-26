@@ -74,13 +74,11 @@ class PrefixLookupTrie {
 
 export function flatRoutes(
   appDirectory: string,
-  ignoredFilePatterns: string[] = [],
-  prefix = "routes"
+  ignoredFilePatterns: string[] = []
 ) {
   let ignoredFileRegex = ignoredFilePatterns
     .map((re) => makeRe(re))
     .filter((re: any): re is RegExp => !!re);
-  let routesDir = path.join(appDirectory, prefix);
 
   let rootRoute = findConfig(appDirectory, "root", routeModuleExts);
 
@@ -90,45 +88,40 @@ export function flatRoutes(
     );
   }
 
-  if (!fs.existsSync(rootRoute)) {
-    throw new Error(
-      `Could not find the routes directory: ${routesDir}. Did you forget to create it?`
-    );
-  }
-
   // Only read the routes directory
-  let entries = fs.readdirSync(routesDir, {
+  let entries = fs.readdirSync(appDirectory, {
     withFileTypes: true,
     encoding: "utf-8",
   });
 
   let routes: string[] = [];
   for (let entry of entries) {
-    let filepath = path.join(routesDir, entry.name);
-
     let route: string | null = null;
     // If it's a directory, don't recurse into it, instead just look for a route module
     if (entry.isDirectory()) {
       route = findRouteModuleForFolder(
         appDirectory,
-        filepath,
+        entry.name,
         ignoredFileRegex
       );
     } else if (entry.isFile()) {
-      route = findRouteModuleForFile(appDirectory, filepath, ignoredFileRegex);
+      route = findRouteModuleForFile(
+        appDirectory,
+        entry.name,
+        ignoredFileRegex
+      );
     }
 
     if (route) routes.push(route);
   }
 
-  let routeManifest = flatRoutesUniversal(appDirectory, routes, prefix);
+  let routeManifest = flatRoutesUniversal(appDirectory, routes);
   return routeManifest;
 }
 
 export function flatRoutesUniversal(
   appDirectory: string,
-  routes: string[],
-  prefix: string = "routes"
+  routes: string[]
 ): RouteManifest {
   let urlConflicts = new Map<string, ConfigRoute[]>();
   let routeManifest: RouteManifest = {};
@@ -142,14 +135,8 @@ export function flatRoutesUniversal(
   for (let file of routes) {
     let normalizedFile = normalizeSlashes(file);
     let routeExt = path.extname(normalizedFile);
-    let routeDir = path.dirname(normalizedFile);
     let normalizedApp = normalizeSlashes(appDirectory);
-    let routeId =
-      routeDir === path.posix.join(normalizedApp, prefix)
-        ? path.posix
-            .relative(normalizedApp, normalizedFile)
-            .slice(0, -routeExt.length)
-        : path.posix.relative(normalizedApp, routeDir);
+    let routeId = normalizedFile.slice(0, -routeExt.length);
 
     let conflict = routeIds.get(routeId);
     if (conflict) {
@@ -170,16 +157,18 @@ export function flatRoutesUniversal(
   );
 
   for (let [routeId, file] of sortedRouteIds) {
-    let index = routeId.endsWith("_index");
-    let [segments, raw] = getRouteSegments(routeId.slice(prefix.length + 1));
-    let pathname = createRoutePath(segments, raw, index);
+    let isIndex = routeId.endsWith("_index.route");
+    let routeIdNoFeature = routeId.slice(0);
+    let noRouteEnding = routeIdNoFeature.replace(".route", "");
+    let [segments, raw] = getRouteSegments(noRouteEnding);
+    let pathname = createRoutePath(segments, raw, isIndex);
 
     routeManifest[routeId] = {
-      file: file.slice(appDirectory.length + 1),
+      file,
       id: routeId,
       path: pathname,
     };
-    if (index) routeManifest[routeId].index = true;
+    if (isIndex) routeManifest[routeId].index = true;
     let childRouteIds = prefixLookup.findAndRemove(routeId, (value) => {
       return [".", "/"].includes(value.slice(routeId.length).charAt(0));
     });
@@ -256,8 +245,10 @@ function findRouteModuleForFile(
   filepath: string,
   ignoredFileRegex: RegExp[]
 ): string | null {
-  let relativePath = path.relative(appDirectory, filepath);
-  let isIgnored = ignoredFileRegex.some((regex) => regex.test(relativePath));
+  let ext = path.extname(filepath);
+  let basename = path.basename(filepath, ext);
+  if (!basename.endsWith(".route")) return null;
+  let isIgnored = ignoredFileRegex.some((regex) => regex.test(filepath));
   if (isIgnored) return null;
   return filepath;
 }
@@ -267,29 +258,27 @@ function findRouteModuleForFolder(
   filepath: string,
   ignoredFileRegex: RegExp[]
 ): string | null {
-  let relativePath = path.relative(appDirectory, filepath);
-  let isIgnored = ignoredFileRegex.some((regex) => regex.test(relativePath));
+  let dirEntries = fs.readdirSync(path.join(appDirectory, filepath), {
+    withFileTypes: true,
+    encoding: "utf-8",
+  });
+
+  let file = dirEntries.find((e) => {
+    let ext = path.extname(e.name);
+    let base = path.basename(e.name, ext);
+    return base.endsWith(".route");
+  });
+
+  if (!file) return null;
+
+  let isIgnored = ignoredFileRegex.some((regex) => regex.test(file!.name));
   if (isIgnored) return null;
 
-  let routeRouteModule = findConfig(filepath, "route", routeModuleExts);
-  let routeIndexModule = findConfig(filepath, "index", routeModuleExts);
-
-  // if both a route and index module exist, throw a conflict error
-  // preferring the route module over the index module
-  if (routeRouteModule && routeIndexModule) {
-    let [segments, raw] = getRouteSegments(
-      path.relative(appDirectory, filepath)
-    );
-    let routePath = createRoutePath(segments, raw, false);
-    console.error(
-      getRoutePathConflictErrorMessage(routePath || "/", [
-        routeRouteModule,
-        routeIndexModule,
-      ])
-    );
+  if (file.isDirectory()) {
+    throw new Error(`no .route on a folder pls`);
   }
 
-  return routeRouteModule || routeIndexModule || null;
+  return file.name;
 }
 
 type State =
